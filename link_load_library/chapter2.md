@@ -22,3 +22,7 @@
 ### 汇编
 
 汇编器是将汇编代码转变成机器可以执行的指令，每一个汇编语句几乎都对应一条机器指令。
+
+### 静态链接
+
+链接过程主要包括了**地址和空间分配(Address and Storage Allocation)**、**符号决议(Symbol Resolution)** 和**重定位(Relocation)** 等这些步骤。
