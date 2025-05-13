@@ -215,3 +215,251 @@ ctor_func ctors_end[1] __attribute__ ((section(".ctors"))) = {
     (ctor_func) -1
 };
 ```
+
+### `atexit` 实现
+
+```c
+// atexit.c
+
+typedef struct _func_node {
+    atexit_func_t func;
+    void* arg;
+    int is_cxa;
+    struct _func_node* next;
+} func_node;
+
+static func_node* atexit_list = 0;
+
+int register_atexit(atexit_func_t func, void* arg, int is_cxa) {
+    func_node* node;
+    if (!func)
+        return -1;
+
+    node = (func_node*)malloc(sizeof(func_node));
+
+    if (node == 0)
+        return -1;
+    
+    node->func = func;
+    node->arg = arg;
+    node->is_cxa = is_cxa;
+    node->next = atexit_list;
+    atexit_list = node;
+    return 0;
+}
+
+typedef void (*cxa_func_t)(void*);
+int __cxa_atexit(cxa_func_t func, void* arg, void* unused) {
+    return register_atexit((atexit_func_t)func, arg, 1);
+}
+
+int atexit(atexit_func_t func) {
+    return register_atexit(func, 0, 0);
+}
+
+void mini_crt_call_exit_routine() {
+    func_node* p = atexit_list;
+    for (; p != 0; p = p->next) {
+        if (p->is_cxa)
+            ((cxa_func_t)p->func)(p->arg);
+        else
+            p->func();
+        free(p);
+    }
+    atexit_list = 0;
+}
+```
+
+### `stream` 与 `string`
+
+```c++
+// string
+
+namespace std {
+
+class string {
+    unsigned len;
+    char* pbuf;
+
+public:
+    explicit string(const char* str);
+    string(const string&);
+    ~string();
+    string& operator=(const string&);
+    string& operator=(const char* s);
+    const char* operator[](unsigned idx) const;
+    char& operator[](unsigned idx);
+    const char* c_str() const;
+    unsigned length() const;
+    unsigned size() const;
+};
+
+string::string(const char* str) :
+    len(0), pbuf(0) {
+    *this = str;
+}
+
+string::string(const string& s) :
+    len(0), pbuf(0) {
+    *this = s;
+}
+
+string::~string() {
+    if (pbuf != 0) {
+        delete[] pbuf;
+        pbuf = 0;
+    }
+}
+
+string& string::operator=(const string& s) {
+    if (&s == this)
+        return *this;
+    this->~string();
+    len = s.len;
+    pbuf = strcpy(new char[len + 1], s.pbuf);
+    return *this;
+}
+
+string& string::operator=(const char* s) {
+    this->~string();
+    len = strlen(s);
+    pbuf = strcpy(new char[len + 1], s);
+    return *this;
+}
+
+const char& string::operator[](unsigned idx) const {
+    return pbuf[idx];
+}
+
+char& string::operator[](unsigned idx) {
+    return pbuf[idx];
+}
+
+const char* string::c_str() const {
+    return p_buf;
+}
+
+unsigned string::length() const {
+    return len;
+}
+
+unsigned string::size() const {
+    return len;
+}
+
+ofstream& operator<<(ofstream& o, const string& s) {
+    return o << s.c_str();
+}
+
+}
+```
+
+```c++
+// iostream
+namespace std {
+
+class ofstream {
+protected:
+    FILE* fp;
+    ofstream(const ofstream&);
+public:
+    enum openmode{in = 1, out = 2, binary = 4, trunc = 8};
+
+    ofstream();
+    explicit ofstream(const char* filename, ofstream::openmode md = ofstream::out);
+    ~ofstream();
+    ofstream& operator<<(char c);
+    ofstream& operator<<(int n);
+    ofstream& operator<<(const char* str);
+    ofstream& operator<<(ofstream& (*)(ofstream&));
+    void open(const char* filename, ofstream::openmode md = ofstream::out);
+    void close();
+    ofstream& write(const char* buf, unsigned size);
+};
+
+inline ofstream& endl(ofstream& o) {
+    return o << '\n';
+}
+
+class stdout_stream : public ofstream {
+public:
+    stdout_stream();
+};
+
+extern stdout_stream cout;
+}
+```
+
+```c++
+// iostream.cpp
+#include "iostream"
+
+namespace std {
+
+stdout_stream::stdout_stream() : ofstream() {
+    fp = stdout;
+}
+
+stdout_stream cout;
+
+ofstream::ofstream() : fp(0) {}
+
+ofstream::ofstream(const char* filename, ofstream::openmode md) : fp(0) {
+    open(filename, md);
+}
+
+ofstream::~ofstream() {
+    close();
+}
+
+ofstream& ofstream::operator<<(char c) {
+    fputc(c, fp);
+    return *this;
+}
+
+ofstream& ofstream::operator<<(int n) {
+    fprintf(fp, "%d", n);
+    return *this;
+}
+
+ofstream& ofstream::operator<<(const char* str) {
+    fprintf(fp, "%s", str);
+    return *this;
+}
+
+ofstream& ofstream::operator<<(ofstream& (*manip)(ofstream&)) {
+    return manip(*this);
+}
+
+void ofstream::open(const char* filename, ofstream::openmode md) {
+    char mode[4];
+    close();
+    switch (md) {
+        case out | trunc:
+            strcpy(mode, "w");
+            break;
+        case out | in | trunc:
+            strcpy(mode, "w+");
+        case out | trunc | binary:
+            strcpy(mode, "wb");
+            break;
+        case out | in | trunc | binary:
+            strcpy(mode, "wb+");
+    }
+    fp = fopen(filename, mode);
+}
+
+void ofstream::close() {
+    if (fp) {
+        fclose(fp);
+        fp = 0;
+    }
+}
+
+ofstream& ofstream::write(const char* buf, unsigned size) {
+    fwrite(buf, 1, size, fp);
+    return *this;
+}
+
+}
+```
