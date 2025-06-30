@@ -72,9 +72,162 @@ policy 只是特征的一个特例或者说特征只用于实现 policy。
 
 ### 元素类型
 
+```c++
+template <typename C>
+struct ElementT {
+    using Type = typename C::value_type;
+};
+```
+
+```c++
+template <typename T>
+using ElementType = typename ElementT<T>::Type;
+```
+
 ### 转换特征
 
 除了提供对基本参数特定方面的访问之外，特征还可以对类型执行转换，例如删除或添加引用、`const` 和 `volatile` 限定符等。
+
+1. 删除引用
+
+```c++
+template <typename T>
+struct RemoveReferenceT {
+    using Type = T;
+};
+
+template <typename T>
+struct RemoveReferenceT<T&> {
+    using Type = T;
+};
+
+template <typename T>
+struct RemoveReferenceT<T&&> {
+    using Type = T;
+};
+```
+
+```c++
+template <typename T>
+using RemoveReference = typename RemoveReference<T>::Type;
+```
+
+2. 添加引用
+
+```c++
+template <typename T>
+struct AddLValueReferenceT {
+    using Type = T&;
+};
+
+template <typename T>
+using AddLValueReference = typename AddLValueReferenceT<T>::Type;
+
+template <typename T>
+struct AddRValueReferenceT<T&> {
+    using Type = T&&;
+};
+
+template <typename T>
+using AddRValueReference = typename AddRValueReferenceT<T>::Type;
+```
+
+```c++
+template <typename T>
+using AddLValueReferenceT = T&;
+
+template <typename T>
+using AddRValueReferenceT = T&&;
+```
+
+```c++
+template <>
+struct AddLValueReferenceT<void> {
+    using Type = void;
+};
+
+template <>
+struct AddLValueReferenceT<void const> {
+    using Type = void const;
+};
+
+template <>
+struct AddLValueReferenceT<void volatile> {
+    using Type = void volatile;
+};
+
+template <>
+struct AddLValueReferenceT<void const volatile> {
+    using Type = void const volatile;
+};
+
+// same as AddRValueReferenceT
+```
+
+3. 删除限定符
+
+```c++
+// traits/removeconst.hpp
+template <typename T>
+struct RemoveConstT {
+    using Type = T;
+};
+
+template <typename T>
+struct RemoveConstT<T const> {
+    using Type = T;
+};
+
+template <typename T>
+using RemoveConst = typename RemoveConstT<T>::Type;
+```
+
+```c++
+#include "removeconst.hpp"
+#include "removevolatile.hpp"
+
+template <typename T>
+struct RemoveCVT : RemoveConstT<typename RemoveVolatileT<T>::Type> {};
+
+template <typename T>
+using RemoveCV = typename RemoveCVT<T>::Type;
+```
+
+```c++
+template <typename T>
+using RemoveCV = RemoveConst<RemoveVolatile<T>>;
+```
+
+4. 退化
+
+```c++
+template <typename T>
+struct DecayT : RemoveCVT<T> {};
+```
+
+```c++
+template <typename T>
+struct DecayT<T[]> {
+    using Type = T*;
+};
+
+template <typename T, std::size_t N>
+struct DecayT<T[N]> {
+    using Type = T*;
+};
+```
+
+```c++
+template <typename R, typename... Args>
+struct DecayT<R(Args...)> {
+    using Type = R (*)(Args...);
+};
+
+template <typename R, typename... Args>
+struct DecayT<R(Args..., ...)> {
+    using Type = R (*)(Args..., ...);
+};
+```
 
 ### 谓词特征
 
@@ -95,3 +248,27 @@ struct IsSameT<T, T> {
 ```
 
 2. `true_type` 与 `false_type`
+
+```c++
+// traits/boolconstant.hpp
+template <bool val>
+struct BootConstant {
+    using Type = BoolConstant<val>;
+    static constexpr bool value = val;
+};
+using TrueType = BoolConstant<true>;
+using FalseType = BoolConstant<false>;
+```
+
+```c++
+#include "boolconstant.hpp"
+
+template <typename T1, typename T2>
+struct IsSameT : FalseType
+{};
+
+template <typename T>
+struct IsSameT<T, T> : TrueType
+{};
+```
+
