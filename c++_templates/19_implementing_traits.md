@@ -75,3 +75,23 @@ policy 只是特征的一个特例或者说特征只用于实现 policy。
 ### 转换特征
 
 除了提供对基本参数特定方面的访问之外，特征还可以对类型执行转换，例如删除或添加引用、`const` 和 `volatile` 限定符等。
+
+### 谓词特征
+
+一种特殊形式的类型特征——谓词特征（产生一个布尔值的类型函数）。
+
+1. ```IsSameT```
+
+```c++
+template <typename T1, typename T2>
+struct IsSameT {
+    static constexpr bool value = false;
+};
+
+template <typename T>
+struct IsSameT<T, T> {
+    static constexpr bool value = true;
+};
+```
+
+2. `true_type` 与 `false_type`
