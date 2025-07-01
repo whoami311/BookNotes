@@ -272,3 +272,299 @@ struct IsSameT<T, T> : TrueType
 {};
 ```
 
+```c++
+template <typename T>
+using IsSame = typename IsSameT<T>::Type;
+```
+
+### 结果类型特征
+
+C++ 标准提供了 `std::declval<>`，其在 `utility` 中的定义如下：
+
+```c++
+namespace std {
+    template <typename T>
+    add_rvalue_reference_t<T> declval() noexcept;
+};
+```
+
+函数 `declval<T>()` 生成一个 `T` 类型的值，而不需要默认构造函数（或任何其他操作）。
+
+上述函数模板是有意未定义的，因为它仅用于 `decltype`、`sizeof` 或其他不需要定义的上下文中。它还有两个有趣的特性。
+
+- 对于可引用类型，返回类型始终是对该类型的右值引用，这使得 `declval` 甚至可以处理通常无法从函数返回的类型，诸如抽象类类型（具有纯虚函数的类）或数组类型。当用作表达式时，从 `T` 到 `T&&` 的转换，对 `declval<T>()` 的行为也没有实际的影响：两者都是右值（如果 `T` 是一个对象类型），而因为存在引用折叠规则，所以左值的引用类型不变。
+- `noexcept` 异常规范说明了 `declval` 本身不会导致表达式被认为抛出异常。当将 `declval` 用在 `noexcept` 运算符的上下文中时，它变得很有用。
+
+结果类型特征提供了一种确定特定操作的精确返回类型的方法。在描述函数模板的结果类型时，该方法通常是很有用的。
+
+## 基于 SFINAE 的特征
+
+SFINAE 原则将模板实参演绎过程中形成无效类型和表达式时出现的潜在错误（这将导致程序格式错误）转换为简单的演绎失败，从而允许重载解析选择不同的候选者。虽然 SFINAE 最初的目的是避免函数模板重载的虚假错误，但它还支持显著的编译期技术，可以确定特定类型或表达式是否有效。这允许我们编写一些特征，例如，确定一个类型是否有一个特定的成员、支持一个特定的操作或者是一个类。
+
+基于 SFINAE 的特征的两种主要实现方法是 SFINAE 函数重载和偏特化。
+
+### SFINAE 函数重载
+
+第 1 种实现基于 SFINAE 的特征的方法是使用 SFINAE 函数重载——确定一个类型是否默认可构造，以便可以创建没有任何初始化值的对象。
+
+```c++
+#include "issame.hpp
+
+template <typename T>
+struct IsDefaultConstructibleT {
+    private:
+        // test() 尝试替换作为 U 传递的 T 的默认构造函数调用
+        template <typename U, typename = decltype(U())>
+        static char test(void*);
+        // test() 回退
+        template <typename>
+        static long test(...);
+    public:
+        static constexpr bool value = IsSameT<decltype(test<T>(nullptr)), char>::value;
+};
+```
+
+1. 基于 SFINAE 的特征的替代实现策略
+
+```c++
+enum { value = sizeof(test<...>(0)) == 1 };
+```
+
+2. 使基于 SFINAE 的特征成为谓词特征
+
+```c++
+#include <type_traits>
+
+template <typename T>
+struct IsDefaultConstructibleHelper {
+    private:
+        // test() 尝试替换作为 U 传递的 T 的默认构造函数调用
+        template <typename U, typename = decltype(U())>
+        static std::true_type test(void*);
+        // test() 回退
+        template <typename>
+        static std::false_type test(...);
+    public:
+        using Type = decltype(test<T>(nullptr));
+};
+template <typename T>
+struct IsDefaultConstructibleT : IsDefaultConstructibleHelper<T>::Type {};
+```
+
+### SFINAE 偏特化
+
+第 2 种实现基于 SFINAE 的特征的方法是使用偏特化。同样，可以用一个实例来确定类型 `T` 是否为默认可构造的：
+
+```c++
+#include "issame.hpp"
+#include <type_traits>  // 定义了 true_type 和 false_type
+
+// helper 要忽略任意数量的模板参数
+template <typename...>
+using VoidT = void;
+
+// 基本模板
+template <typename, typename = VoidT<>>
+struct IsDefaultConstructibleT : std::false_type {};
+
+// 偏特化（可能会被 SFINAE 取消）
+template <typename T>
+struct IsDefaultConstructibleT<T, VoidT<decltype(T())>> : std::true_type {};
+```
+
+### 为 SFINAE 使用泛型 lambda 表达式
+
+在 C++17 中通过指定在泛型 lambda 表达式中检查的条件，来使样例代码最小化。
+
+```c++
+#include <utility>
+
+// helper: 对于 F f 和 Args... args，检查 f(args...) 的有效性
+
+template <typename F, typename... Args, typename = decltype(std::declval<F>()(std::declval<Args&&>()...))>
+std::true_type isValidImpl(void*);
+
+// 如果 helper 被 SFINAE 取消，则回退
+template <typename F, typename... Args>
+std::false_type isValidImpl(...);
+
+// 定义一个 lambda，它接收 lambda f，并返回用 args 调用 f 是否有效
+inline constexpr auto isValid = [] (auto f) {
+    return [] (auto&&... args) {
+        return decltype(isValidImpl<decltype(f), decltype(args)&&...>(nullptr)) {};
+    };
+};
+
+// helper 模板将类型表示为一个值
+template <typename T>
+struct TypeT {
+    using Type = T;
+};
+
+// helper 将类型包装为值
+template <typename T>
+constexpr auto type = TypeT<T>{};
+
+// helper 在未计算的上下文中展开包装类型
+template <typename T>
+T valueT(TypeT<T>); // 不需要定义
+```
+
+```c++
+isDefaultConstructible(type<int>)   // true （int 是默认可构造的）
+isDefaultConstructible(type<int&>)  // false （引用不是默认可构造的）
+```
+
+`isDefaultConstructible` 特征与以前的特征的实现稍有不同，因为它需要函数风格的调用，而不是指定模板实参。这可以说是一种更易于阅读的表示法，但也可以使用先前的风格。
+
+```c++
+template <typename T>
+using IsDefaultConstructibleT = decltype(isDefaultConstructible(std::declval<T>()));
+```
+
+但是，由于这是一个传统的模板声明，因此，它只能出现在命名空间作用域中，而可以想象，`isDefaultConstructible` 的定义是在块的作用域中引入的。
+
+到目前为止，这项技术似乎并没有引起人们的注意，因为实现中涉及的表达式和使用风格都比以前的技术要更为复杂。然而，一旦 `isValid` 就位并被理解，许多特征就可以通过一个声明来实现。例如：
+
+```c++
+constexpr auto hasFirst = isValid([] (auto x) -> decltype((void)valueT(x).first) {});
+```
+
+### SFINAE 友好的特征
+
+一般来说，一个类型特征应该能够解决一个特定的查询问题，而不会导致程序的格式不合规。基于 SFINAE 的特征通过在 SFINAE 环境中小心地捕捉潜在的问题来解决这个问题，将那些可能出现的错误转化为负面结果。
+
+```c++
+// traits/hasplus.hpp
+#include <utility>      // 对于 declval
+#include <type_traits>  // 对于 true_type、false_type 和 void_t
+
+// 基本模板
+template <typename, typename, typename = std::void_t<>>
+struct HasPlusT : std::false_type {};
+
+// 偏特化（可能会被 SFINAE 取消）
+template <typename T1, typename T2>
+struct HasPlusT<T1, T2, std::void_t<decltype(std::declval<T1>() + std::declval<T2>())>> : std::true_type {};
+```
+
+```c++
+#include "hasplus.hpp"
+
+template <typename T1, typename T2, bool = HasPlusT<T1, T2>::value>
+struct PlusResultT { // 基本模板：当 HasPlusT 生成 true 时使用
+    using Type = decltype(std::declval<T1>() + std::declval<T2>());
+};
+
+template <typename T1, typename T2>
+struct PlusResultT<T1, T2, false> { // 否则使用偏特化
+};
+```
+
+作为一个常见的设计原则，如果给定合理的模板实参作为输入，一个特征模板在实例化时不应该失败。通常的方法是执行两次相应的检查：
+
+- 一次检查操作是否有效
+- 一次计算结果
+
+```c++
+template <typename C, bool = HasMemberT_value_type<C>::value>
+struct ElementT {
+    using Type = typename C::value_type;
+};
+
+template <typename C>
+struct ElementT<C, false> {};
+```
+
+## `IsConvertibleT`
+
+```c++
+#include <type_traits>  // 对于 true_type 和 false_type
+#include <utility>      // 对于 declval
+
+template <typename FROM, typename TO>
+struct IsConvertibleHelper {
+    private:
+        // test() 尝试调用作为 F 传递的 FROM 的 helper 对象 aux(TO)
+        static void aux(TO);
+        template <typename F, typename T,
+                  typename = decltype(aux(std::decltype<F>()))>
+        static std::true_type test(void*);
+
+        // test() 回退
+        template <typename, typename>
+        static std::false_type test(...);
+    
+    public:
+        using Type = decltype(test<FROM>(nullptr));
+};
+
+template <typename FROM, typename TO>
+struct IsConvertibleT : IsConvertibleHelper<FROM, TO>::Type {};
+
+template <typename FROM, typename TO>
+using IsConvertible = typename IsConvertibleT<FROM, TO>::Type;
+
+template <typename FROM, typename TO>
+constexpr bool isConvertible = IsConvertibleT<FROM, TO>::value;
+```
+
+```c++
+template <typename FROM, typename TO, bool = IsVoidT<TO>::value
+                                             || IsArrayT<TO>::value
+                                             || IsFunctionT<TO>::value>
+struct IsConvertibleHelper {
+    using Type = std::integral_constant<bool,
+                                        IsVoidT<TO>::value
+                                        && IsVoidT<FROM>::value>;
+};
+
+template <typename FROM, typename TO>
+struct IsConvertibleHelper<FROM, TO, false> {
+    ... // 这是 IsConvertibleHelper 以前的实现代码
+};
+```
+
+## 检测成员
+
+针对基于 SFINAE 的特征的另一个尝试涉及创建一个特征（或者更确切地说，一组特征），它可以确定一个给定类型 `T` 是否有一个名称为 `X` 的成员（一个类型或一个非类型成员）。
+
+### 检测成员类型
+
+```c++
+#include <type_traits>  // true_type 和 false_type 的定义
+
+// 忽略任意个数的模板参数的 helper
+template <typename...>
+using VoidT = void;
+
+// 基本模板
+template <typename, typename = VoidT<>>
+struct HasSizeTypeT : std::false_type {};
+
+// 偏特化（可能会被 SFINAE 取消）
+template <typename T>
+struct HasSizeTypeT<T, VoidT<typename T::size_type>> : std::true_type {};
+```
+
+1. 处理引用类型
+
+```c++
+template <typename T>
+struct HasSizeTypeT<T, VoidT<RemoveReference<T>::size_type>> : std::true_type {};
+```
+
+2. 插入式类名
+
+我们检查成员类型的特征技术也会为插入式类名生成 `true` 值。
+
+```c++
+struct size_type {};
+
+struct Sizeable : size_type {};
+
+static_assert(HasSizeTypeT<Sizeable>::value,
+              "Compiler bug: Injected class name missing");
+```
+
+后一个静态断言成功，因为 `size_type` 将自己的名称作为成员类型引入，并且该名称是继承的。
