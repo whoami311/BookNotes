@@ -502,4 +502,81 @@ void decrement() {
 
 随机访问迭代器的定义可以此类推，出于简洁，在此省略。
 
-这就是了！有了投射迭代器，我们可以输出某个用来装 `Person` 值的 `vector` 里的人们的名字：
+门面模式在创建需遵循某些特定接口的新类型时尤其管用。新类型只需公开少数的核心运算（对于我们的迭代器门面而言是 2~6 个）给门面，门面就可以使用 CRTP 和 Barton-Nackman 技巧提供完整、正确的公共接口。
+
+## 混入
+
+混入（mixin）提供了继承之外的另一种方法来定制一个类型的行为。混入本质上反转了一般的继承方向，因为这些新的类是作为类模板的基类“混入”继承层次结构的，而不是作为一个新的派生类被创建的。这种方法允许引入新的数据成员和其他运算，而不需要对接口进行任何重复。
+
+支持混入的类模板通常会支持自任意个数的附加类进行派生：
+
+```c++
+template <typename... Mixins>
+class Point : public Mixins... {
+  public:
+    double x, y;
+    Point() : Mixins()..., x(0.0), y(0.0) {}
+    Point(double x, double y) : Mixins()..., x(x), y(y) {}
+};
+```
+
+混入可用于模板需要一些小级别的定制的场景（例如用用户指定的数据装饰内部存储的对象），而不需要库公开和记录这些内部数据类型及其接口。
+
+### 奇妙的混入
+
+混入可以与 CRTP 相结合而变得更加强大。其中，每个混入实际上是一个类模板，派生类的类型将会提供给它，让它对该派生类进行额外的定制。一个 CRTP-混入版本的 `Point` 会这样写：
+
+```c++
+template <template<typename>... Mixins>
+class Point : public Mixins<Point>... {
+  public:
+    double x, y;
+    Point() : Mixins<Point>()..., x(0.0), y(0.0) {}
+    Point(double x, double y) : Mixins<Point>()..., x(x), y(y) {}
+};
+```
+
+这种写法需要为每个将被混入的类做更多的工作，所以像 `Label` 和 `Color` 这样的类将需要成为类模板。然而，混入的类现在就可以根据它们将要混入的派生类的具体实例来调整它们的行为。例如，我们可以将之前讨论过的 `ObjectCounter` 模板混入 `Point` 中以统计 `Polygon` 创建的点的数量，还可以将该混入与其他应用特定的混入组合起来。
+
+### 参数化的虚拟性
+
+混入还允许我们间接地对派生类的其他属性进行参数化，比如成员函数的虚拟性。下面这个简单的示例展示了这种相当惊人的技巧。
+
+```c++
+#include <iostream>
+
+class NotVirtual {}; 
+
+class Virtual {
+  public:
+    virtual void foo() {}
+};
+
+template <typename... Mixins>
+class Base : public Mixins... {
+  public:
+    // foo() 的虚拟性取决于它
+    // （如果有的话）在基类混入中的声明……
+    void foo() {
+        std::cout << "Base::foo()" << '\n';
+    }
+};
+
+template <typename... Mixins>
+class Derived : public Base<Mixins> {
+  public:
+    void foo() {
+        std::cout << "Derived::foo()" << '\n';
+    }
+};
+
+int main() {
+    Base<NotVirtual>* pl = new Derived<NotVirtual>;
+    pl->foo();  // 调用 Base::foo()
+
+    Base<Virtual>* p2 = new Derived<Virtual>;
+    p2->foo();  // 调用 Derived::foo()
+}
+```
+
+根据这种技巧可以设计出一种类模板，它们既可以用来实例化具体的类，也可以使用继承来扩展。然而，仅仅在一些成员函数上“点缀”些虚拟性，往往并不足以让一个类成为可以支持更多特化功能的优秀基类。此类的开发方法需要更多根本的设计决策。因此，更实际的做法往往是分别设计两种不同的手段（类或类模板层级），而不是试图把它们整合到一个模板层级中。
