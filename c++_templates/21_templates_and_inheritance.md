@@ -580,3 +580,135 @@ int main() {
 ```
 
 根据这种技巧可以设计出一种类模板，它们既可以用来实例化具体的类，也可以使用继承来扩展。然而，仅仅在一些成员函数上“点缀”些虚拟性，往往并不足以让一个类成为可以支持更多特化功能的优秀基类。此类的开发方法需要更多根本的设计决策。因此，更实际的做法往往是分别设计两种不同的手段（类或类模板层级），而不是试图把它们整合到一个模板层级中。
+
+## 命名模板实参
+
+各种模板技巧有时会导致一个类模板最终有许多不同的模板类型形参。然而，这些形参中的许多往往有合理的默认值。定义这样一个类模板的自然方式可能是：
+
+```c++
+template <typename Policy1 = DefaultPolicy1,
+          typename Policy2 = DefaultPolicy2,
+          typename Policy3 = DefaultPolicy3,
+          typename Policy4 = DefaultPolicy4>
+class BreadSlicer {
+    ...
+};
+```
+
+可以预见，这样的模板通常可以使用 `BreadSlicer<>` 的语法来使用默认的模板实参值。然而，如果必须指定一个非默认形参，那所有排在前面的形参也必须被指定（即使它们可能有默认值）。
+
+显然，要是能使用类似 `BreadSlicer<Policy3 = Custom>` 的构造，而不是像目前这样使用 `BreadSlicer<DefaultPolicy1, DefaultPolicy2, Custom>`，将是有吸引力的。接下来所阐述的技巧几乎可以完全实现这一目标。
+
+我们的技巧包括把默认类型值放在基类中，并且通过派生来覆盖其中的一些。不直接指定类型实参，而是通过辅助类提供它们。例如，我们可以写 `BreadSlicer<Policy3_is<Custom>>`。因为每一个模板实参可以描述任意一个策略（policy），默认值也不例外。换言之，在高层次上，每个模板形参是等价的。
+
+```c++
+template <typename PolicySetter1 = DefaultPolicyArgs,
+          typename PolicySetter2 = DefaultPolicyArgs,
+          typename PolicySetter3 = DefaultPolicyArgs,
+          typename PolicySetter4 = DefaultPolicyArgs>
+class BreadSlicer {
+    using Policies = PolicySelector<PolicySetter1, PolicySetter2,
+                                    PolicySetter3, PolicySetter4>;
+    // 使用 Policies::P1、Policies::P2 等来指代各种策略
+    ...
+};
+```
+
+下一个挑战是编写 `PolicySelector` 模板。它必须把不同的模板形参合并成一个单一的类型，该类型以用户指定的非默认类型来覆盖默认的类型别名成员。这种合并可以通过继承实现：
+
+```c++
+// PolicySelector<A, B, C, D> 创造 A、B、C、D 作为基类
+// Discriminator<> 即便基类相同，也能多次继承
+template <typename Base, int D>
+class Discriminator : public Base {};
+
+template <typename Setter1, typename Setter2,
+          typename Setter3, typename Setter4>
+class PolicySelector : public Discriminator<Setter1, 1>,
+                       public Discriminator<Setter2, 2>,
+                       public Discriminator<Setter3, 3>,
+                       public Discriminator<Setter4, 4> {};
+```
+
+请注意中间类模板 `Discriminator` 的使用。通过它来指定各个 `Setter` 可以是相同类型。（不允许多个相同类型的直接基类，而间接基类则可以有与其他基类相同的类型。）
+
+正如上面介绍的，到此就可以把默认值合并到一个基类中：
+
+```c++
+// 命名默认策略为 P1、P2、P3、P4
+class DefaultPolicies {
+  public:
+    using P1 = DefaultPolicy1;
+    using P2 = DefaultPolicy2;
+    using P3 = DefaultPolicy3;
+    using P4 = DefaultPolicy4;
+};
+```
+
+然而，如果我们最终从这个基类中多次继承，就必须注意避免歧义。因此，我们确保基类是虚继承的：
+
+```c++
+// 以类来定义默认策略值的使用方法，避免了我们从 DefaultPolicies 派生多次产生的歧义
+class DefaultPolicyArgs : virtual public DefaultPolicies {};
+```
+
+最后，我们还需要一些模板来覆盖默认策略值。
+
+```c++
+template <typename Policy>
+class Policy1_is : virtual public DefaultPolicies {
+  public:
+    using P1 = Policy;  // 覆盖类型别名
+};
+
+template <typename Policy>
+class Policy2_is : virtual public DefaultPolicies {
+  public:
+    using P2 = Policy;  // 覆盖类型别名
+};
+
+template <typename Policy>
+class Policy3_is : virtual public DefaultPolicies {
+  public:
+    using P3 = Policy;  // 覆盖类型别名
+};
+
+template <typename Policy>
+class Policy4_is : virtual public DefaultPolicies {
+  public:
+    using P4 = Policy;  // 覆盖类型别名
+};
+```
+
+这些都到位后，我们就实现了预期的目标。现在通过实例来看看我们得到了什么。我们实例化一个 `BreadSlicer<>`，如下所示：
+
+```c++
+BreadSlicer<Policy3_is<CustomPolicy>> bc;
+```
+
+对于这样的 `BreadSlicer<>`，类型 `Policies` 被定义为
+
+```c++
+PolicySelector<Policy3_is<CustomPolicy>,
+               DefaultPolicyArgs,
+               DefaultPolicyArgs,
+               DefaultPolicyArgs>
+```
+
+在 `Discriminator<>` 类模板的帮助下，这就产生了一个层次结构，其中所有模板实参都是基类。重要的一点是，这些基类都有相同的虚基类 `DefaultPolicies`，它定义了 `P1`、`P2`、`P3`、`P4` 的默认类型。然而，`P3` 在其中一个派生类中被重新定义，也就是在 `Policy3_is<>` 中。根据优先性规则（domination rule），这个定义隐藏了基类的定义。因此，这不是一个歧义。
+
+在模板 `BreadSlicer` 内部可以用有限定的名称来指代这 4 个策略，如 `Policies::P3`。示例如下：
+
+```c++
+template<...>
+class BreadSlicer {
+    ...
+  public:
+    void print() {
+        Policies::P3::doPrint();
+    }
+    ...
+};
+```
+
+前面的内容以 4 个模板类型形参为例介绍了这一技巧，但显然这一技巧可以规模化到任何合理形参数目的情形。请注意，我们实际上从来没有实例化含有虚基类的辅助类的对象。那么，它们作为虚基类就不会带来任何性能或内存消耗问题。
