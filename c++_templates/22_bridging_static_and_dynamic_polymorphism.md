@@ -159,3 +159,108 @@ FunctionPtr<R(Args...)>::FunctionPtr(F&& f) : bridge(nullptr) {
 请注意，虽然 `FunctionPtr` 构造函数本身是以函数对象类型 `F` 为模板的，但该类型只为 `SpecificFunctorBridge` 的特定特化（由 `Bridge` 类型别名描述）所知。一旦新分配的 `Bridge` 示例被赋给数据成员 `bridge`，由于从 `Bridge*` 到 `FunctorBridge<R, Args...>*` 的由派生类到基类的转换，关于特定类型 `F` 的额外信息就会丢失。这种类型信息的丢失解释了为什么类型擦除这个术语经常被用来描述静多态和动多态之间的桥接技巧。
 
 该实现的一个独特之处是使用 `std::decay` 来产生 `Functor` 类型，这使得推断的类型 `F` 适用于存储，例如，通过将对函数类型的引用转换为函数指针类型并删除顶层的 `const`、`volatile` 和引用类型。
+
+## 可选的桥接
+
+我们的 `FunctionPtr` 模板几乎可以直接替代函数指针。然而，它还不支持一个函数指针可以提供的运算：测试两个 `FunctionPtr` 对象是否会调用同一个函数。添加这样的运算需要升级 `FunctorBridge`，加入一个 `equals` 运算：
+
+```c++
+virtual bool equals(FunctorBridge const& fb) const = 0;
+```
+
+以及 `SpecificFunctorBridge` 中的一部分实现，当它们具有相同类型时比较存储的函数对象：
+
+```c++
+virtual bool equals(FunctorBridge<R, Args...> const* fb) const override {
+    if (auto specFb = dynamic_cast<SpecificFunctorBridge const*>(fb)) {
+        return functor == specFb->functor;
+    }
+    // 不同类型的 functor 永远不等
+    return false;
+}
+```
+
+最后，我们为 `FunctionPtr` 实现 `operator==`，它首先检查 `functor` 是否为 null，然后将其委托给 `FunctorBridge`：
+
+```c++
+friend bool operator==(FunctionPtr const& f1, FunctionPtr const& f2) {
+    if (!f1 || !f2) {
+        return !f1 && !f2;
+    }
+    return f1.bridge->equals(f2.bridge);
+}
+
+friend bool operator!=(FunctionPtr const& f1, FunctionPtr const& f2) {
+    return !(f1 == f2);
+}
+```
+
+这个实现是正确的。然而，它有一个令人遗憾的缺点：如果没有合适的 `operator==` 的函数对象（例如 lambda 表达式）赋值或初始化 `FunctionPtr`，程序会编译失败。这也许令人意外，因为 `FunctionPtr` 的 `operator==` 甚至还没有被使用，而其他许多类模板（诸如 `std::vector`）可以用没有 `operator==` 的类型进行实例化，只要它们自己的 `operator==` 不会被使用。
+
+`operator==` 的这个问题是由类型擦除造成的：因为一旦 `FunctionPtr` 被赋值或初始化，我们实际上就失去了函数对象的类型信息，所以我们需要在该赋值或初始化完成之前就捕获需要知道的关于类型的所有信息。这些信息包括构建对函数对象的 `operator==` 的调用，因为我们无法确定何时会需要它。
+
+幸好，通过精心构造的特征，我们可以使用基于 SFINAE 的特征在调用 `operator==` 之前检查它是否可用。
+
+```c++
+// bridge/isequalitycomparable.hpp
+#include <utility>  // 为了 declval()
+#include <type_traits>  // 为了 true_type 和 false_type
+
+template <typename T>
+class IsEqualityComparable {
+  private:
+    // 测试 == 和 != 到 bool 的转换
+    static void* conv(bool);    // 检查到 bool 的转换
+    template <typename U>
+    static std::true_type test(decltype(conv(std::declval<U const&>() == std::declval<U const&>())),
+                               decltype(conv(!(std::declval<U const&>() == std::declval<U const&>()))));
+
+    // 后备
+    template <typename U>
+    static std::false_type test(...);
+
+  public:
+    static constexpr bool value = decltype(test<T>(nullptr, nullptr))::value;
+};
+```
+
+`IsEqualityComparable` 特征应用了 19.4.1 节中介绍的表达式测试特征的典型形式：两个 `test()` 重载，其中一个包含用 `decltype` 标识的要测试的表达式，另一个通过省略号接收任意参数。第 1 个 `test()` 重载试图使用 `==` 来比较两个类型为 `T const` 的对象，然后确保结果既可以隐式转换为 `bool`（对于第 1 个参数），又可以传递给逻辑否定运算符 `!`，进而将结果转换为 `bool`。如果两个运算都是结构良好的（well formed），参数类型本身将都是 `void*`。
+
+使用 `IsEqualityComparable` 特征，我们就可以构造 `TryEquals` 类模板，可以要么在给定的类型上调用 `==`（当它提供时），要么当没有合适的 `==` 存在时抛出异常。
+
+```c++
+#include <exception>
+#include "isequalitycomparable.hpp"
+
+template <typename T, bool EqComparable = IsEqualityComparable<T>::value>
+struct TryEquals {
+    static bool equals(T const& x1, T const& x2) {
+        return x1 == x2;
+    }
+};
+
+class NotEqualityComparable : public std::exception {};
+
+template <typename T>
+struct TryEquals<T, false> {
+    static bool equals(T const& x1, T const& x2) {
+        throw NotEqualityComparable();
+    }
+};
+```
+
+最后，通过在我们的 `SpecificFunctorBridge` 实现中使用 `TryEquals`，我们能够在 `FunctionPtr` 中提供对 `==` 的支持，前提是存储的函数对象类型匹配并且支持 `==`。
+
+```c++
+virtual bool equals(FunctorBridge<R, Args...> const* fb) const override {
+    if (auto specFb = dynamic_cast<SpecificFunctorBridge const*>(fb)) {
+        return TryEquals<Functor>::equals(functor, specFb->functor);
+    }
+    // 不同类型的 functor 永远不相等
+    return false;
+}
+```
+
+## 性能考虑
+
+类型擦除兼顾了静多态和动多态的一些优点，但并非全部。特别是，使用类型擦除生成的代码，其性能更接近动多态的性能，因为都通过虚函数使用了动态派发。于是，一些静多态的传统优点，比如编译器可以内联调用，可能就会失去。这种性能上的损失是否达到了可以感知的程度取决于应用，但是通常容易判断，即比较被调用的函数的运算量和虚函数调用的成本：如果两者很接近（例如，使用 `FunctionPtr` 只是使两个整数相加），那么类型擦除的执行速度可能比静多态的版本慢得多；如果函数调用执行了大量的工作（如查询数据库、对容器排序或更新用户界面），那么类型擦除的成本不大可能达到可感知的程度。
