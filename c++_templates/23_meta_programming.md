@@ -63,3 +63,96 @@ struct MyTriple {
 因为 `std::tuple` 和 `std::variant` 同 `struct` 类型一样，都是异质类型，使用这种类型的混合元编程有时被称为异质元编程。
 
 ### 单位类型的混合元编程
+
+另一个展示混合计算能力的例子是能够计算不同单位类型的值的计算结果的库。值的计算在运行期进行，但结果单位的计算在编译期就确定了。
+
+让我们用一个高度简化的例子来说明这一点。我们将以它们对于主要单位的比值（分数）来记录单位。例如，如果时间的主要单位是秒（s），那么 1ms 就用比值 1/1000 表示，1min 用比值 60/1 表示。所以，关键是要定义一个比值类型，其中每个值都有自己的类型：
+
+```c++
+template <unsigned N, unsigned D = 1>
+struct Ratio {
+  static constexpr unsigned num = N;    // 分子
+  static constexpr unsigned den = D;    // 分母
+  using Type = Ratio<num, den>;
+};
+```
+
+现在我们可以进行编译期的计算，如两个比值相加：
+
+```c++
+// 两个比值相加的实现
+template <typename R1, typename R2>
+struct RatioAddImpl {
+  private:
+    static constexpr unsigned den = R1::den * R2::den;
+    static constexpr unsigned num = R1::num * R2::den + R2::num * R1::den;
+  public:
+    typedef Ratio<num, den> Type;
+};
+
+// using 声明以方便使用
+template <typename R1, typename R2>
+using RatioAdd = typename RatioAddImpl<R1, R2>::Type;
+```
+
+这使我们能够在编译期计算出两个比值的和。
+
+我们现在可以为持续时间定义一个类模板，以一个任意的值类型和一个 `Ratio<>` 实例化后的单位类型作为它的参数。
+
+```c++
+template <typename T, typename U = Ratio<1>>
+class Duration {
+  public:
+    using ValueType = T;
+    using UnitType = typename U::Type;
+  private:
+    ValueType val;
+  public:
+    constexpr Duration(ValueType v = 0) : val(v) {}
+
+    constexpr ValueType value() const {
+        return val;
+    }
+};
+```
+
+值得注意的是 `operator+` 的定义。将两个持续时间相加：
+
+```c++
+// 将两个单位类型可能不同的持续时间相加
+template <typename T1, typename U1, typename T2, typename U2>
+auto constexpr operator+(Duration<T1, U1> const& lhs, Duration<T2, U2> const& rhs) {
+  // 结果类型是一个单位，其分子是 1，分母是将两个单位的比值相加后所得分数的分母
+  using VT = Ratio<1, RatioAdd<U1, U2>::den>;
+  // 结果的值是转换到结果单位类型的两个值的和
+  auto val = lhs.value() * VT::den / U1::den * U1::num +
+             rhs.value() * VT::den / U2::den * U2::num;
+  return Duration<decltype(val), VT>(val);
+}
+```
+
+参数可以有不同的单位类型：`U1` 和 `U2`。使用这些单位类型计算出持续时间，使其具有相应的单位类型，即相应的单位分数（分子为 `1` 的分数）。
+
+关键的“混合”效果是，编译器在编译期确定结果的单位类型，并在运行期计算结果的值所需要的代码，而值会根据结果的单位类型进行调整。
+
+由于值类型是一个模板参数，我们可以使用的值类型不限于 `int` 的 `Duration` 类，甚至可以使用异质的值类型（只要类型的值的加法运算是定义好的）。
+
+此外，如果值在编译期已知，编译器甚至可以在编译期计算出值，因为持续时间的 `operator+` 是 `constexpr`。
+
+C++ 标准库的类模板 `std::chrono` 使用了这种方法，并做了一些改进，例如使用预定义的单位（如 `std::chrono::milliseconds`）支持持续时间字面量（例如 `10ms`），以及处理溢出。
+
+## 反射元编程的维度
+
+之前，我们描述了基于 `constexpr` 求值的值元编程和基于递归模板实例化的类型元编程。这两种元编程，在现在 C++ 中都是可用的，它们显然涉及驱动计算的不同方法。事实证明，值元编程也可以以递归模板实例化的方式来驱动，而且，在 C++11 中引入 `constexpr` 函数之前，这正是其实现机制。
+
+无论如何，可以看到，元编程的计算引擎有可能有许多潜在选项。然而，计算引擎并不是考虑这些选项的唯一维度。进一步说，一个全面的 C++ 元编程解决方法必须以 3 个维度做出选择：
+
+- 计算
+- 反射
+- 生成
+ 
+反射是指以编程方式检查程序的特性的能力。生成是指为程序生成额外代码的能力。
+
+我们已经看到了计算的两种选择：递归实例化和 `constexpr` 求值。对于反射，我们已经在类型特征中找到了部分解决方案。尽管可用的特征能够实现相当多的高阶模板技术，但它们远远没有涵盖语言中反射功能的所有需求。
+
+17.9 节也展示了一种潜在的、未来的代码生成机制。在现有的 C++ 语言中创建一个灵活的、通用的、对程序员友好的代码生成机制仍然是一个挑战，各方都在探讨。然而，实例化模板其实一直就是某种代码生成机制。此外，编译器在将小型函数调用展开为内联方面已经变得足够可靠，以至于该机制可被用作代码生成的工具。结合更强大的反射功能，现有的技术已经可以实现出色的元编程效果。
