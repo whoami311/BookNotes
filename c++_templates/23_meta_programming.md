@@ -8,3 +8,58 @@
 
 ### 值元编程
 
+### 类型元编程
+
+```c++
+// 基本模板：一般产生的是给定的类型
+template <typename T>
+struct RemoveAllExtentsT {
+  using Type = T;
+};
+
+// 为（有界或无界的）数组类型偏特化
+template <typename T, std::size_t SZ>
+struct RemoveAllExtentsT<T[SZ]> {
+  using Type = typename RemoveAllExtentsT<T>::Type;
+};
+
+template <typename T>
+struct RemoveAllExtentsT<T[]> {
+  using Type = typename RemoveAllExtentsT<T>::Type;
+};
+
+template <typename T>
+using RemoveAllExtents = typename RemoveAllExtentsT<T>::Type;
+```
+
+这里，`RemoveAllExtents` 是一个类型元函数（即一种生产类型的计算工具），它将从一个类型中移除任意数量的顶层“数组层”。
+
+元函数通过让与顶层数组相匹配的偏特化递归地“调用”元函数本身来执行其任务。
+
+假如我们所能用的都只是标量值，那么用值进行计算就是非常受限的。幸运的是，几乎任何编程语言都至少有一个值容器构造，它极大地扩展了该语言的功能（大多数语言都有各种容器类型，如数组 / `vector`、哈希表等）。类型元编程的情况也是如此：增加一个“类型的容器”构造会扩大该技术的适用范围。幸运的是，现代 C++ 包含能够开发这样一个容器的机制。
+
+### 混合元编程
+
+通过值元编程和类型元编程，我们可以在编译时计算值和类型。然而最终，我们对运行期的效果感兴趣，所以我们在运行期的代码中，在预期有类型和常量的地方使用元编程。不过，元编程能做的还不止这些。我们可以在编译期以编程方式组装具有运行期效果的代码片段。我们称之为混合元编程。
+
+我们在前面提到，如果有一个“类型的容器”，类型元编程的能力就会得到极大的增强。我们已经看到，在混合元编程中，一个固定长度的数组类型可能是有用的。尽管如此，混合元编程中真正的“英雄容器”是元组。元组是一个值的序列，每个值都有一个可选择的类型。C++ 标准库包含一个支持这种观念的 `std::tuple` 类模板。比如，
+
+```c++
+std::tuple<int, std::string, bool> tVal{ 42, "Answer", true};
+```
+
+上述的 `tVal` 的类型与一个简单的 `struct` 类型非常相似，如：
+
+```c++
+struct MyTriple {
+  int vl;
+  std::string v2;
+  bool v3;
+};
+```
+
+既然对于数组类型和（简单的）`struct` 类型，我们已经有了灵活的 `std::array` 和 `std::tuple` 分别与之对应，自然会想到，对于简单的 `union` 类型，它的模板对应物对混合计算是否同样有用。答案是“是的”。C++ 标准库在 C++17 中为此目的引入了 `std::variant` 模板。
+
+因为 `std::tuple` 和 `std::variant` 同 `struct` 类型一样，都是异质类型，使用这种类型的混合元编程有时被称为异质元编程。
+
+### 单位类型的混合元编程
