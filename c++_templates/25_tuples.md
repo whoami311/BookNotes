@@ -198,3 +198,125 @@ std::ostream& operator<<(std::ostream& strm, Tuple<Types...> const& t) {
 现在，创建和显示元组就比较容易了。
 
 ## 元组算法
+
+元组是一种容器，它提供的功能有访问和修改每个元素（通过 `get()`）、创建新元组（直接地或通过 `makeTuple()`）和将元组分解成头部和尾部（通过 `getHead()` 和 `getTail()`）。这些基本功能足以用来打造成套的元组算法，如为元组增加或删除元素、重新排列元素，或选择元组内的元素的某个子集。
+
+元组算法特别有趣，因为它们既需要编译期计算，也需要运行期计算。就像第 24 章的类型列表算法一样，对元组应用算法可能会产生类型完全不同的元组，这需要编译期计算。例如，将 `Tuple<int, double, string>` 反转会产生 `Tuple<string, double, int>`。然而，就像同质容器的算法（例如，对 `std::vector` 应用 `std::reverse()`），元组算法实际上需要在运行期执行代码，我们要对所生成代码的效率心中有数。
+
+### 作为类型列表
+
+如果忽略我们的 `Tuple` 模板的实际运行期组件，我们会发现它的结构与第 24 章中开发的 `Typelist` 模板完全一样：它接收任意数量的模板类型形参。事实上，通过一些偏特化，我们可以把 `Tuple` 变成具有全功能的类型列表。
+
+```c++
+// 判断元组是否为空
+template<>
+struct IsEmpty<Tuple<>> {
+  static constexpr bool value = true;
+};
+
+// 提取前面的元素
+template<typename Head, typename... Tail>
+class FrontT<Tuple<Head, Tail...>> {
+ public:
+  using Type = Head;
+};
+
+// 删除前面的元素
+template<typename Head, typename... Tail>
+class PopFrontT<Tuple<Head, Tail...>> {
+ public:
+  using Type = Tuple<Tail...>;
+};
+
+// 将元素加到前面
+template<typename... Types, typename Element>
+class PushFrontT<Tuple<Types...>, Element> {
+ public:
+  using Type = Tuple<Element, Types...>;
+};
+
+// 将元素加到后面
+template<typename... Types, typename Element>
+class PushBackT<Tuple<Types...>, Element> {
+ public:
+  using Type = Tuple<Types..., Element>;
+};
+```
+
+现在，第 24 章中开发的所有类型列表算法对 `Tuple` 和 `Typelist` 同样有效，于是我们就可以轻松处理元组的类型。
+
+下面马上会看到，应用于元组的类型列表算法常被用来帮助确定元组算法的结果类型。
+
+### 增删
+
+能在元组的头部和尾部增加一个元素是重要的功能，有了它我们就可以构建更高级的算法来操纵元组中的值。与类型列表一样，再元组的前面插入元素要比在后面插入元素容易得多，所以我们从 `pushFront()` 开始。
+
+```c++
+template<typename... Types, typename V>
+PushFront<Tuple<Types...>, V>
+pushFront(Tuple<Types...> const& tuple, V const& value) {
+  return PushFront<Tuple<Types...>, V>(value, tuple);
+}
+```
+
+在现有元组的前面添加一个新的元素（称为 `value`），需要我们形成一个以 `value` 为头部，以现有元组为尾部的新元组。生成的元组类型是 `Tuple<V, Types...>`。然而，我们选择使用类型列表算法 `PushFront()` 来演示元组算法的编译期层面与运行期层面的紧密耦合，编译期的 `PushFront()` 计算出需要构造的类型，运行期用它来生成合适的值。
+
+在现有元组的末尾添加一个新的元素就比较复杂了，因为这需要对元组进行递归遍历，边遍历边构建修改后的元组。请注意 `pushBack()` 实现的结构，看它如何遵循 24.2.3 节中类型列表 `PushBack()` 的递归实现方式。
+
+```c++
+// 基础分支
+template<typename V>
+Tuple<V> pushBack(Tuple<> const&, V const& value)
+{
+  return Tuple<V>(value);
+}
+
+// 递归分支
+template<typename Head, typename... Tail, typename V>
+Tuple<Head, Tail..., V>
+pushBack(Tuple<Head, Tail...> const& tuple, V const& value) {
+  return Tuple<Head, Tail..., V>(tuple.getHead(),
+                                 pushBack(tuple.getTail(), value));
+}
+```
+
+不出所料，基础分支将一个值追加到一个长度为 0 的元组，它产生一个只包含该值的元组。在递归分支中，我们将列表起始处的当前元素（`tuple.getHead()`）和添加新元素到列表尾部的结果元组（由递归的 `pushBack()` 调用得到）组装起来，形成一个新的元组。尽管我们选择将构造的类型表达为 `Tuple<Head, Tail..., V>`，请注意，这相当于使用编译期的 `PushBack<Tuple<Head, Tail...>, V>`。
+
+同样容易实现 `popFront()`：
+
+```c++
+template<typename... Types>
+PopFront<Tuple<Types...>> popFront(Tuple<Types...> const& tuple) {
+  return tuple.getTail();
+}
+```
+
+### 反转
+
+元组的元素仍然可以用递归元组算法来反转，其结构遵循 24.2.4 节的类型列表反转的递归实现方式：
+
+```c++
+// 基础分支
+Tuple<> reverse(Tuple<> const& t) {
+  return t;
+}
+
+// 递归分支
+template<typename Head, typename... Tail>
+Reverse<Tuple<Head, Tail...>> reverse(Tuple<Head, Tail...> const& t) {
+  return pushBack(reverse(t.getTail()), t.getHead());
+}
+```
+
+基础分支不必细说，而递归分支则是将列表的尾部反转，并把当前的头部追加其后。
+
+与类型列表类似，现在可以对临时反转的列表调用 `popFront()`，结合使用 24.2.4 节的 `PopBack()`，从而轻松提供 `popBack()`：
+
+```c++
+template<typename... Types>
+PopBack<Tuple<Types...>> popBack(Tuple<Types...> const& tuple) {
+  return reverse(popFront(reverse(tuple)));
+}
+```
+
+### 索引列表
