@@ -320,3 +320,208 @@ PopBack<Tuple<Types...>> popBack(Tuple<Types...> const& tuple) {
 ```
 
 ### 索引列表
+
+25.3.3 节中元组反转的递归写法是正确的，但在运行期，它的低效令它显得毫无用处。
+
+太多次拷贝了！在元组反转的理想实现中，每个元素只会被拷贝一次，即从源元组直接拷贝到结果元组中的正确位置。通过小心地使用引用，包括使用对中间实参类型的引用，我们可以实现这个目标。但是这样做会让实现变得相当复杂。
+
+为了消除元组反转中不必要的拷贝，可以简单地使用 `makeTuple()` 和 `get()` 做到这一点：
+
+```c++
+auto reversed = makeTuple(get<4>(copies), get<3>(copies),
+                          get<2>(copies), get<1>(copies),
+                          get<0>(copies));
+```
+
+索引列表（也称为索引序列，参阅 24.4 节）泛化了这一观念，其将元组索引的集合捕获到一个形参包中，这样就能通过包扩展来产生 `get` 调用序列。这就让索引运算和索引列表的实际应用可以分离开来，索引运算可以是任意复杂的模板元程序，而索引列表的实际应用则重在运行期效率。标准类型 `std::integer_sequence`（在 C++14 中引入）常被用来表示索引列表。
+
+### 用索引列表反转
+
+为了用索引列表进行元组反转，我们首先需要一个索引列表的表示。索引列表是一种包含数值的类型列表，目的是作为类型列表或异质数据结构的索引使用（参阅 24.4 节）。我们使用 24.3 节中开发的 `Valuelist` 类型表示我们的索引列表。与上面的元组反转例子相对应的索引列表是：
+
+```c++
+Valuelist<unsigned, 4, 3, 2, 1, 0>
+```
+
+如何产生这样的索引列表呢？一种方式是，首先生成一个索引列表，从 0 到 N-1（包含）递增计数，其中 N 是一个元组的长度。用一个简单的模板元程序 `MakeIndexList` 来实现：
+
+```c++
+// 递归分支
+template<unsigned N, typename Result = Valuelist<unsigned>>
+struct MakeIndexListT
+  : MakeIndexListT<N-1, PushFront<Result, CTValue<unsigned, N-1>>> {};
+
+// 基础分支
+template<typename Result>
+struct MakeIndexListT<0, Result> {
+  using Type = Result;
+};
+
+template<unsigned N>
+using MakeIndexList = typename MakeIndexListT<N>::Type;
+```
+
+然后我们便能将此运算与类型列表的 `Reverse` 组合来产生合适的索引列表：
+
+```c++
+using MyIndexList = Reverse<MakeIndexList<5>>;
+// equivalent to Valuelist<unsigned, 4, 3, 2, 1, 0>
+```
+
+为了实际执行反转，需要将索引列表中的索引捕获到非类型形参包中。这通过将索引集合元组的 `reverse()` 算法分为两部分来处理：
+
+```c++
+template<typename... Elements, unsigned... Indices>
+auto reverseImpl(Tuple<Elements...> const& t,
+                 Valuelist<unsigned, Indices...>) {
+  return makeTuple(get<Indices>(t)...);
+}
+
+template<typename... Elements>
+auto reverse(Tuple<Elements...> const& t) {
+ return reverseImpl(t, Reverse<MakeIndexList<sizeof...(Elements)>>());
+}
+```
+
+在 C++11 中，返回类型必须声明为
+
+```c++
+-> decltype(makeTuple(get<Indices>(t)...))
+```
+
+以及
+
+```c++
+-> decltype(reverseImpl(t, Reverse<MakeIndexList<sizeof...(Elements)>>()))
+```
+
+`reverseImpl()` 函数模板从它的 `Valuelist` 参数中将索引捕获到形参包 `Indices` 中。然后用捕获的索引形成的索引集合对元组调用 `get()` 形成实参，以此实参调用 `makeTuple()` 得到返回结果。
+
+正如前面所讨论的，`reverse` 算法本身只形成了合适的索引集合，并将其提供给 `reverseImpl` 算法。索引是作为模板元程序被操作的，因此它不产生运行期代码。仅有的运行期代码在 `reverseImpl` 中，它使用 `makeTuple()` 一步构建结果元组，因此只对元组元素进行一次拷贝。
+
+### 重排和选择
+
+25.3.5 节中用来形成反转元组的 `reverseImpl()` 函数模板实际上不包含 `reverse()` 运算的具体代码。更准确地说，它只从某个现有的元组中选择一组特定的索引，并使用它们来形成一个新的元组。`reverse()` 提供了一个反转的索引集合，而许多算法都可以建立在这个核心的元组 `select()` 算法之上。
+
+```c++
+template<typename... Elements, unsigned... Indices>
+auto select(Tuple<Elements...> const& t,
+            Valuelist<unsigned, Indices...>) {
+  return makeTuple(get<Indices>(t)...);
+}
+```
+
+元组的“溅”（splat）运算就是建立在 `select()` 之上的一个简单算法，它从元组中抽取并拷贝某个元素来创建另一个元组，其中包含该元素一定数量的副本。比如：
+
+```c++
+Tuple<int, double, std::string> t1(42, 7.7, "hello");
+auto a = splat<1, 4>(t);
+std::cout << a << '\n';
+```
+
+将产生 `Tuple<double, double, double, double>`，它的每一个值都是一份 `get<1>(t)` 的副本，所以会输出
+
+```c++
+(7.7, 7.7, 7.7, 7.7)
+```
+
+`splat()` 是 `select()` 的一个直接应用，通过给定一个元程序，产生一个“要被拷贝的”索引集合，包含值 `I` 的 N 个副本。
+
+```c++
+template<unsigned I, unsigned N, typename IndexList = Valuelist<unsigned>>
+class ReplicatedIndexListT;
+ 
+template<unsigned I, unsigned N, unsigned... Indices>
+class ReplicatedIndexListT<I, N, Valuelist<unsigned, Indices...>>  
+  : public ReplicatedIndexListT<I, N-1,
+                                Valuelist<unsigned, Indices..., I>> {};
+
+template<unsigned I, unsigned... Indices>
+class ReplicatedIndexListT<I, 0, Valuelist<unsigned, Indices...>> {
+ public:
+  using Type = Valuelist<unsigned, Indices...>;
+};
+
+template<unsigned I, unsigned N>
+using ReplicatedIndexList = typename ReplicatedIndexListT<I, N>::Type;
+
+template<unsigned I, unsigned N, typename... Elements>
+auto splat(Tuple<Elements...> const& t) {
+  return select(t, ReplicatedIndexList<I, N>());
+}
+```
+
+通过模板元程序来操纵索引列表，在对其应用 `select()`，即便是复杂的元组算法也能实现。例如，我们可以使用 24.2.7 节中开发的插入排序，来按元素类型的大小对元组中的元素进行排序。给出这样一个 `sort()` 函数，它接收一个比较元组元素类型大小的模板元函数进行比较运算，我们就可以用如下代码按类型大小对元组元素进行排序：
+
+```c++
+#include <complex>
+
+template<typename T, typename U>
+class SmallerThanT {
+ public:
+  static constexpr bool value = sizeof(T) < sizeof(U);
+};
+
+void testTupleSort() {
+  auto T1 = makeTuple(17LL, std::complex<double>(42, 77), 'c', 42, 7.7);
+  std::cout << t1 << '\n';
+  auto T2 = sort<SmallerThanT>(t1); // t2 is Tuple<int, long, std::string>
+  std::cout << "sorted by size: " << t2 << '\n';
+}
+```
+
+输出可能如下：
+
+```c++
+(17, (42,77), c, 42, 7.7)
+sorted by size: (c, 42, 7.7, 17, (42,77))
+```
+
+实际的 `sort()` 实现涉及以元组的 `select()` 来使用 `InsertionSort`。
+
+```c++
+// 比较元组中元素的元函数的包装
+template<typename List, template<typename T, typename U> class F>
+class MetafunOfNthElementT {
+ public:
+  template<typename T, typename U> class Apply;
+
+  template<unsigned N, unsigned M>
+  class Apply<CTValue<unsigned, M>, CTValue<unsigned, N>>
+    : public F<NthElement<List, M>, NthElement<List, N>> {};
+};
+
+// 基于元素类型大小的比较对元组元素排序
+template<template<typename T, typename U> class Compare,
+         typename... Elements>
+auto sort(Tuple<Elements...> const& t) {
+  return select(t,
+                InsertionSort<MakeIndexList<sizeof...(Elements)>,
+                              MetafunOfNthElementT<
+                                         Tuple<Elements...>,
+                                         Compare>::template Apply>());
+}
+```
+
+请仔细观察 `InsertionSort` 的使用：实际上要被排序的类型列表是由指向类型列表元素的索引组成的列表，它由 `MakeIndexList<>` 构造。因此，插入排序的结果也是由指向元组元素的索引组成的集合，它随后被提供给 `select()`。然而，因为 `InsertionSort` 是对索引进行操作，所以它期望它的比较运算能够比较两个索引。考虑非元编程的例子，比如对 `std::vector` 的索引进行排序，就更容易理解其原理：
+
+```c++
+#include <vector>
+#include <algorithm>
+#include <string>
+
+int main() {
+  std::vector<std::string> strings = {"banana", "apple", "cherry"};
+  std::vector<unsigned> indices = { 0, 1, 2 };
+  std::sort(indices.begin(), indices.end(),
+            [&strings](unsigned i, unsigned j) {
+                return strings[i] < strings[j];
+            });
+}
+```
+
+这里，`indices` 包含指向 `vector strings` 中元素的索引。`sort()` 运算对实际索引进行排序，所以要提供 lambda 进行比较运算，它接收两个 `unsigned` 值（而不是 `string` 值）。而 lambda 的函数体使用这些 `unsigned` 值作为指向 `strings` 这一 `vector` 中元素的索引，所以排序实际上是根据 `strings` 的内容进行的。排序结束时，`indices` 提供指向 `strings` 中元素的索引，并且它们已经根据元素值排好序了。
+
+我们在元组的 `sort()` 中使用 `InsertionSort` 也采用了同样的方法。适配器模板 `MetafunOfNthElementT` 提供了一个模板元函数（其嵌套的 `Apply`），它接收两个索引（`CTValue` 的特化），并使用 `NthElement` 从其 `Typelist` 实参中提取相应的元素。在某种意义上，成员模板 `Apply` 已“捕获”了提供给它所在模板（`MetafunOfNthElementT`）的类型列表，就像 lambda 从它所在的作用域捕获 `strings` 这一 `vector` 一样。然后 `Apply` 将提取的元素类型转发给底层元函数 `F`，完成适配。
+
+请注意，本节的所有排序计算都在编译期进行，并直接形成结果元组，在运行期没有额外的值拷贝。
