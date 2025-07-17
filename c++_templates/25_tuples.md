@@ -525,3 +525,226 @@ int main() {
 我们在元组的 `sort()` 中使用 `InsertionSort` 也采用了同样的方法。适配器模板 `MetafunOfNthElementT` 提供了一个模板元函数（其嵌套的 `Apply`），它接收两个索引（`CTValue` 的特化），并使用 `NthElement` 从其 `Typelist` 实参中提取相应的元素。在某种意义上，成员模板 `Apply` 已“捕获”了提供给它所在模板（`MetafunOfNthElementT`）的类型列表，就像 lambda 从它所在的作用域捕获 `strings` 这一 `vector` 一样。然后 `Apply` 将提取的元素类型转发给底层元函数 `F`，完成适配。
 
 请注意，本节的所有排序计算都在编译期进行，并直接形成结果元组，在运行期没有额外的值拷贝。
+
+## 展开元组
+
+元组可用于将一组相关的值存储在一起，成为一个单一的值，无论这些相关的值有什么类型或有多少。有时，可能需要对这样的元组进行展开，例如，将其元素作为单独的参数传递给函数。
+
+我们可以使用索引列表实现这一目的。下面的函数模板 `apply()` 接收一个函数和一个元组，它以展开的元组元素调用函数：
+
+```c++
+template <typename F, typename... Elements, unsigned... Indices>
+auto applyImpl(F f, Tuple<Elements...> const& t,
+                    Valuelist<unsigned, Indices...>)
+  ->decltype(f(get<Indices>(t)...)) {
+  return f(get<Indices>(t)...);
+}
+
+template <typename F, typename... Elements,
+          unsigned N = sizeof...(Elements)>
+auto apply(F f, Tuple<Elements...> const& t)
+  ->decltype(applyImpl(f, t, MakeIndexList<N>())) {
+  return applyImpl(f, t, MakeIndexList<N>());
+}
+```
+
+`applyImpl()` 函数模板接收一个给定的索引列表并用它来展开元组的元素，将其放入它的函数对象形参 `f` 的形参列表中。面向使用者的 `apply()` 只负责构造初始的索引列表。
+
+C++17 提供了一个类似的函数，适用于任意类似于元组的类型。
+
+## 优化元组
+
+元组是一种基本的异质容器，有大量的潜在用途。因此，值得考虑如何优化它在运行期（如减少存储、执行时间）和编译期（如减少模板实例化的数目）的使用。本节将讨论对上文中的 `Tuple` 实现的一些具体优化。
+
+### 元组和 EBCO
+
+对于 `Tuple` 的存储方式，我们使用了比严格意义上所需更多的存储空间。一个问题是，`tail` 成员终究是一个空元组，因为每个非空元组都以一个空元组结束，而数据成员至少占用一个字节的存储空间。
+
+为提高 `Tuple` 的存储效率，我们可以应用空基类优化（EBCO），让元组从尾部元组继承，而不是让尾部元组成为成员。例如：
+
+```c++
+template<typename Head, typename... Tail>
+class Tuple<Head, Tail...> : private Tuple<Tail...> {
+ private:
+  Head head;
+ public:
+  Head& getHead() { return head; }
+  Head const& getHead() const { return head; }
+  Tuple<Tail...>& getTail() { return *this; }
+  Tuple<Tail...> const& getTail() const { return *this; }
+};
+```
+
+这与 21.1.2 节中对 `BaseMemberPair` 采取的方法相同。遗憾的是，实际上它产生副作用，即颠倒构造函数中元组元素初始化的顺序。先前，因为 `head` 成员在 `tail` 成员之前，所以 `head` 会先被初始化。在新的 `Tuple` 存储方式里，尾部在基类中，所以它将在成员 `head` 之前被初始化。
+
+为解决这一问题，可以将 `head` 成员放入元组的基类，把它放在基类列表中的尾部基类之前。该方法的直接实现将引入一个 `TupleElt` 模板，用于包装每个元素类型，于是 `Tuple` 可以从它继承：
+
+```c++
+template<typename... Types>
+class Tuple;
+
+template<typename T>
+class TupleElt {
+  T value;
+
+ public:
+  TupleElt() = default;
+
+  template<typename U>
+  TupleElt(U&& other) : value(std::forward<U>(other)) {}
+
+  T&       get()       { return value; }
+  T const& get() const { return value; }
+};
+
+ // 递归分支
+template<typename Head, typename... Tail>
+class Tuple<Head, Tail...>
+  : private TupleElt<Head>, private Tuple<Tail...> {
+ public:
+  Head& getHead() {
+    // 潜在歧义
+    return static_cast<TupleElt<Head>*>(this)->get();
+  }
+
+  Head const& getHead() const {
+    // 潜在歧义
+    return static_cast<TupleElt<Head> const*>(this)->get();
+  }
+  Tuple<Tail...>& getTail() { return *this; }
+  Tuple<Tail...> const& getTail() const { return *this; }
+};
+
+// 基础分支
+template<>
+class Tuple<> {
+// 无需存储
+};
+```
+
+虽然这种方法解决了初始化先后的问题，但它引入了一个新的（更糟糕的）问题：我们无法再从一个有两个相同类型元素的元组中提取元素，比如 `Tuple<int, int>`，因为从元组到该相同类型的 `TupleElt`（比如 `TupleElt<int>`）进行的派生类到基类的转换将是有歧义的。
+
+为了消除这种歧义，我们需要确保每个 `TupleElt` 基类在一个给定的 `Tuple` 中是唯一的。一种方法是在其元组内对元素的“高度”进行编码，也就是对尾部元组的长度进行编码。元组中的最后一个元素将被存储为高度 0，倒数第 2 个元素将被存储为高度 1，以此类推。
+
+```c++
+template<unsigned Height, typename T>
+class TupleElt {
+  T value;
+ public:
+  TupleElt() = default;
+
+  template<typename U>
+  TupleElt(U&& other) : value(std::forward<U>(other)) {}
+
+  T&       get() { return value; }
+  T const& get() const { return value; }
+};
+```
+
+有了这个解决方案，我们可以产生一个应用了 ECBO 的 `Tuple`，同时保持初始化次序合理和支持同一类型的多个元素
+
+```c++
+template<typename... Types>
+class Tuple;
+
+// 递归分支
+template<typename Head, typename... Tail>
+class Tuple<Head, Tail...>
+  : private TupleElt<sizeof...(Tail), Head>, private Tuple<Tail...> {
+  using HeadElt = TupleElt<sizeof...(Tail), Head>;
+ public:
+  Head& getHead() {
+    return static_cast<HeadElt*>(this)->get();
+  }
+  Head const& getHead() const {
+    return static_cast<HeadElt const*>(this)->get();
+  }
+  Tuple<Tail...>& getTail() { return *this; }
+  Tuple<Tail...> const& getTail() const { return *this; }
+};
+
+// 基础分支
+template<>
+class Tuple<> {
+  // 无需存储
+};
+```
+
+有了这个实现，下面的程序：
+
+```c++
+#include <algorithm>
+#include "tupleelt1.hpp"
+#include "tuplestorage3.hpp"
+#include <iostream>
+
+struct A {
+  A() {
+    std::cout << "A()" << '\n';
+  }
+};
+
+struct B {
+  B() {
+    std::cout << "B()" << '\n';
+  }
+};
+
+int main() {
+  Tuple<A, char, A, char, B> t1;
+  std::cout << sizeof(t1) << " bytes" << '\n';
+}
+```
+
+输出
+
+```
+A()
+A()
+B()
+5 bytes
+```
+
+ECBO 已经消除了一个字节（对于空元组 `Tuple<>`）。请注意，`A` 和 `B` 都是空类，这提示在 `Tuple` 中还有一次应用 ECBO 的机会。`TupleElt` 可以稍微进行扩展，在安全的情况下继承元素类型，而不需要改变 `Tuple`。
+
+```c++
+#include <type_traits>
+
+template<unsigned Height, typename T,
+         bool = std::is_class<T>::value && !std::is_final<T>::value>
+class TupleElt; 
+
+template<unsigned Height, typename T>
+class TupleElt<Height, T, false> {
+  T value;
+
+ public:
+  TupleElt() = default;
+  template<typename U>
+  TupleElt(U&& other) : value(std::forward<U>(other)) {} 
+  T&       get() { return value; }
+  T const& get() const { return value; }
+};
+
+template<unsigned Height, typename T>
+class TupleElt<Height, T, true> : private T {
+ public:
+  TupleElt() = default;
+  template<typename U>
+  TupleElt(U&& other) : T(std::forward<U>(other)) {}
+ 
+  T&       get() { return *this; }
+  T const& get() const { return *this; }
+};
+```
+
+当提供给 `TupleElt` 的是一个非 `final` 的类的时候，它会私有地继承该类，以允许把 EBCO 应用到存储的值。有了这个改动，前面的程序现在输出
+
+```
+A()
+A()
+B()
+2 bytes
+```
+
+### 常数时间复杂度的 `get()`
