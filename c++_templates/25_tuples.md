@@ -748,3 +748,33 @@ B()
 ```
 
 ### 常数时间复杂度的 `get()`
+
+在使用元组时，`get()` 操作极为常见，但是它的递归实现需要线性数量的模板实例化，这会影响编译时间。幸好，25.5.1 节介绍的 EBCO 也可以让 `get()` 的实现更加高效，下面来具体介绍。
+
+关键在于，模板实参推导在将一个形参（基类类型）与一个实参（派生类类型）相匹配时，推导出基类的模板实参。因此，如果可以计算出希望提取的元素的高度 `H`，我们就可以依赖从 `Tuple` 特化到 `TupleElt<H, T>`（其中 `T` 是推导出来的）的转换来提取该元素，而无需手动遍历所有的索引。
+
+```c++
+template <unsigned H, typename T>
+T& getHeight(TupleElt<H,T>& te) {
+  return te.get();
+}
+
+template<typename... Types>
+class Tuple; 
+
+template<unsigned I, typename... Elements>
+auto get(Tuple<Elements...>& t) -> decltype(getHeight<sizeof...(Elements) - I - 1>(t)) {
+  return getHeight<sizeof...(Elements) - I - 1>(t);
+}
+```
+
+因为 `get<I>(t)` 接收的是所需元素的索引 `I`（从元组的开始算起），而元组实际上是按照高度 `H` 存储的（从元组的结束算起），所以我们从 `I` 中计算出 `H`。为 `getHeight()` 调用而进行的模板实参推导执行实际的搜索：高度 `H` 是固定的，因为它是在调用中显式提供的，所以只有一个 `TupleElt` 基类将被匹配，从它那里将推导出类型 `T`。请注意，`getHeight()` 必须被声明为 `Tuple` 的友元，以允许到私有基类的转换。例如：
+
+```c++
+// 在类模板 Tuple 的递归分支内部
+template <unsigned I, typename... Elements>
+friend auto get(Tuple<Elements...>& t)
+  -> decltype(getHeight<sizeof...(Elements) - I - 1>(t));
+```
+
+请注意，这个实现只需要常数数量的模板实例化，因为我们已经将匹配索引的艰苦工作转移给了编译器的模板参数推导引擎。
