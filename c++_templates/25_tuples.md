@@ -778,3 +778,110 @@ friend auto get(Tuple<Elements...>& t)
 ```
 
 请注意，这个实现只需要常数数量的模板实例化，因为我们已经将匹配索引的艰苦工作转移给了编译器的模板参数推导引擎。
+
+## 元组索引
+
+原则上，也可以定义一个 `operator[]` 来访问元组的元素，类似于 `std::vector` 定义 `operator[]` 的方式。然而，与 `std::vector` 不同，元组的每个元素都可以有不同的类型，所以元组的 `operator[]` 必须是一个模板，结果类型会根据元素的索引而不同。这又要求每个索引有不同的类型，所以索引的类型可以用来确定元素的类型。
+
+24.3 节中介绍的类模板 `CTValue` 允许我们在一个类型中对数字索引进行编码。我们可以用它来定义一个索引运算符作为 `Tuple` 的成员。
+
+```c++
+template <typename T, T Index>
+  auto& operator [](CTValue<T, Index>) {
+  return get<Index>(*this);
+}
+```
+
+在此，使用在 `CTValue` 形参类型内传入的索引值来进行相应的 `get<>()` 调用。
+
+```c++
+auto t = makeTuple(0, '1', 2.2f, std::string{"hello"});
+auto a = t[CTValue<unsigned, 2>{}];
+auto b = t[CTValue<unsigned, 3>{}];
+```
+
+`a` 和 `b` 将会分别以元组中的第 3 个和第 4 个元素的类型和值来初始化。
+
+为了让常数索引的使用更加方便，可以用 `constexpr` 实现字面量运算符，从而可以从常规的以 `_c` 为后缀的字面量中直接计算出数值的编译期字面量。
+
+```c++
+#include "ctvalue.hpp"
+#include <cassert>
+#include <cstddef>
+
+// 在编译期转换单个 char 值到相应的 int 值
+constexpr int toInt(char c) {
+  // 十六进制字符
+  if (c >= 'A' && c <= 'F') {
+    return static_cast<int>(c) - static_cast<int>('A') + 10;
+  }
+  if (c >= 'a' && c <= 'f') {
+    return static_cast<int>(c) - static_cast<int>('a') + 10;
+  }
+  // 其他（不支持带有 '.' 的浮点型字面量）
+  assert(c >= '0' && c <= '9');
+  return static_cast<int>(c) - static_cast<int>('0');
+}
+
+// 编译期解析 char 类型数组到相应的 int 值
+template<std::size_t N>
+constexpr int parseInt(char const (&arr)[N]) {
+  int base = 10;        // 处理基数（默认是十进制的）
+  int offset = 0;       // 跳过类似 0x 这样的前缀
+  if (N > 2 && arr[0] == '0') {
+    switch (arr[1]) {
+      case 'x':         // 因为前缀为 0x 或 0X，所以是十六进制
+      case 'X':
+        base = 16;
+        offset = 2;
+        break;
+      case 'b':      // 因为前缀为 0b 或者 0B（自 C++14 以来），所以是二进制
+      case 'B':
+        base = 2;
+        offset = 2;
+        break;
+      default:       // 因为前缀为 0，所以是八进制
+        base = 8;
+        offset = 1;
+        break;
+    }
+  }
+  // 0迭代所有数字，计算出结果的值
+  int value = 0;
+  int multiplier = 1;
+  for (std::size_t i = 0; i < N - offset; ++i) {
+    if (arr[N-1-i] != '\'') { //忽略分隔的单引号（例如在 1'000 中）
+ (e.g. in 1'000)
+      value += toInt(arr[N-1-i]) * multiplier;
+      multiplier *= base;
+    }
+  }
+  return value;
+}
+
+// 字面量运算符：解析以 _c 为后缀的整型字面量为 char 序列
+template<char... cs>
+constexpr auto operator"" _c() {
+  return CTValue<int, parseInt<sizeof...(cs)>({cs...})>{};
+}
+```
+
+这里我们利用了一个事实，即对于数值字面量，可以使用字面量运算符去推导字面量的每个字符作为它自己的模板形参（详情请参阅 15.5.1 节）。我们传递这些字符给 `constexpr` 辅助函数 `parseInt()`，该函数在编译期计算出字符序列的值并将值以 `CTValue` 给出。
+
+例如：
+
+- `42_c` 给出 `CTValue<int, 42>`
+- `0x815_c` 给出 `CTValue<int, 2069>`
+- `0b1111'1111_c` 给出 `CTValue<int, 255>`
+
+请注意，该解析器不处理浮点型字面量。对于浮点型字面量，断言会造成一个编译期错误，因为它是一个运行期特性，无法在编译期语境中使用。
+
+有了这些，我们可以这样来使用元组：
+
+```c++
+auto t = makeTuple(0, '1', 2.2f, std::string{"hello"});
+auto c = t[2_c];
+auto d = t[3_c];
+```
+
+这种方式被用于 Boost.Hana —— 一个既适用于计算类型，也适用于计算值的元编程库。
