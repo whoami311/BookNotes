@@ -43,7 +43,7 @@
 ## Item 14：如果函数不抛出异常请使用 `noexcept`
 
 - `noexcept` 是函数接口的一部分，这意味着调用者可能会依赖它
-- `noexcept` 函数较之于 non-noexcept 函数更容易优化
+- `noexcept` 函数较之于 non-`noexcept` 函数更容易优化
 - `noexcept` 对于移动语义，`swap`，内存释放函数和析构函数非常有用
 - 大多数函数是异常中立的（译注：可能抛也可能不抛异常）而不是 `noexcept`
 
@@ -51,7 +51,7 @@
 
 - `constexpr` 对象是 `const`，它被在编译期可知的值初始化
 - 当传递编译期可知的值时，`constexpr` 函数可以产出编译期可知的结果
-- `constexpr` 对象和函数可以使用的范围比 non-constexpr 对象和函数要大
+- `constexpr` 对象和函数可以使用的范围比 non-`constexpr` 对象和函数要大
 - `constexpr` 是对象和函数接口的一部分
 
 ## Item 16：让 `const` 成员函数线程安全
